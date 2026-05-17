@@ -156,6 +156,7 @@ export const EditorWorkspace = () => {
   // We use a ref to prevent double-registration on re-renders,
   // since monaco instances persist.
   const providerRegistered = useRef(false);
+  const lastSuggestionTime = useRef(0);
 
   const onMount: OnMount = (editor, monaco) => {
     editorRef.current = editor;
@@ -166,6 +167,13 @@ export const EditorWorkspace = () => {
       providerRegistered.current = true;
       monaco.languages.registerInlineCompletionsProvider("*", {
         provideInlineCompletions: async (model, position, context, token) => {
+          // Rate-limit suggestions to once every 5 minutes (300,000 ms) 
+          // to prevent spamming the backend API
+          const now = Date.now();
+          if (now - lastSuggestionTime.current < 300000) {
+            return { items: [] };
+          }
+
           const textUntilPosition = model.getValueInRange({
             startLineNumber: 1,
             startColumn: 1,
@@ -177,6 +185,8 @@ export const EditorWorkspace = () => {
           if (textUntilPosition.trim().length < 10) {
             return { items: [] };
           }
+
+          lastSuggestionTime.current = now;
 
           try {
             const res = await apiPost<{ data: { output: string } }>("/ai/generate", {
