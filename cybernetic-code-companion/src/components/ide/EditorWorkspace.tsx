@@ -135,7 +135,6 @@ export const EditorWorkspace = () => {
   const { tabs, activeTabId, setActive, closeTab, updateContent, splitView, toggleSplit } = useIDE();
   const active = tabs.find((t) => t.id === activeTabId);
   const [promptOpen, setPromptOpen] = useState(false);
-  const [showSuggest, setShowSuggest] = useState(true);
   const addTerminalLine = useIDE((s) => s.addTerminalLine);
   const editorRef = useRef<Parameters<OnMount>[0] | null>(null);
 
@@ -154,10 +153,62 @@ export const EditorWorkspace = () => {
     }
   };
 
+  // We use a ref to prevent double-registration on re-renders,
+  // since monaco instances persist.
+  const providerRegistered = useRef(false);
+
   const onMount: OnMount = (editor, monaco) => {
     editorRef.current = editor;
     monaco.editor.defineTheme("codepilot-neon", monacoTheme);
     monaco.editor.setTheme("codepilot-neon");
+
+    if (!providerRegistered.current) {
+      providerRegistered.current = true;
+      monaco.languages.registerInlineCompletionsProvider("*", {
+        provideInlineCompletions: async (model, position, context, token) => {
+          const textUntilPosition = model.getValueInRange({
+            startLineNumber: 1,
+            startColumn: 1,
+            endLineNumber: position.lineNumber,
+            endColumn: position.column,
+          });
+
+          // Only suggest if they have typed a few words
+          if (textUntilPosition.trim().length < 10) {
+            return { items: [] };
+          }
+
+          try {
+            const res = await apiPost<{ data: { output: string } }>("/ai/generate", {
+              prompt: `Complete the following code. ONLY return the new code that follows exactly after this prefix. DO NOT output markdown formatting like \`\`\`js or \`\`\`. Do NOT repeat the prefix. Just the immediate next code block or characters:\n\n${textUntilPosition}`,
+              system: "You are an AI code completion engine. You act exactly like GitHub Copilot. Output only raw text that represents the rest of the code. If the user stops mid-line, complete the line. If it's the end of a line, write the next logical lines. DO NOT add chatty text or backticks.",
+            });
+            
+            let completion = res.data?.output || "";
+            if (completion.startsWith("\`\`\`")) {
+               completion = completion.replace(/^\`\`\`[\w]*\n/, "").replace(/\n\`\`\`$/, "");
+            }
+            
+            return {
+              items: [
+                {
+                  insertText: completion,
+                  range: new monaco.Range(
+                    position.lineNumber,
+                    position.column,
+                    position.lineNumber,
+                    position.column
+                  ),
+                },
+              ],
+            };
+          } catch (e) {
+            return { items: [] };
+          }
+        },
+        freeInlineCompletions: () => {},
+      });
+    }
   };
 
   return (
@@ -251,38 +302,9 @@ export const EditorWorkspace = () => {
                   padding: { top: 12 },
                   scrollBeyondLastLine: false,
                   renderLineHighlight: "all",
+                  inlineSuggest: { enabled: true, showToolbar: "always" },
                 }}
               />
-              {/* AI suggestion overlay */}
-              <AnimatePresence>
-                {showSuggest && (
-                  <motion.div
-                    initial={{ opacity: 0, x: 20 }}
-                    animate={{ opacity: 1, x: 0 }}
-                    exit={{ opacity: 0, x: 20 }}
-                    className="absolute bottom-4 right-4 max-w-xs glass-strong rounded-lg p-3 border border-secondary/40 shadow-glow-secondary"
-                  >
-                    <div className="flex items-center gap-2 mb-1.5 text-xs">
-                      <Lightbulb className="h-3.5 w-3.5 text-secondary" />
-                      <span className="font-mono text-secondary">AI SUGGESTION</span>
-                      <button
-                        onClick={() => setShowSuggest(false)}
-                        className="ml-auto text-muted-foreground hover:text-foreground"
-                      >
-                        <X className="h-3 w-3" />
-                      </button>
-                    </div>
-                    <div className="text-xs text-foreground/80">
-                      Extract <span className="font-mono text-primary">setCount</span> into a custom hook for reusability.
-                    </div>
-                    <div className="mt-2 flex gap-1.5">
-                      <Button size="sm" className="h-6 text-[10px] bg-gradient-neon text-background" onClick={() => setShowSuggest(false)}>Apply</Button>
-                      <Button size="sm" variant="ghost" className="h-6 text-[10px]" onClick={() => setShowSuggest(false)}>Dismiss</Button>
-                    </div>
-                  </motion.div>
-                )}
-              </AnimatePresence>
-
             </div>
 
             {splitView && (
